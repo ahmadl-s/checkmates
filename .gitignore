@@ -35,3 +35,8 @@ htmlcov/
 *.egg-info/
 dist/
 build/
+
+# SQLite database (runtime artifacts)
+*.db
+*.db-shm
+*.db-wal
