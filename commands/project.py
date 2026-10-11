@@ -183,6 +183,294 @@ class ProjectSetupView(discord.ui.View):
             view=None
         )
 
+
+class TaskSelect(discord.ui.Select):
+    def __init__(self, guild_id: int, project_tasks: list):
+        self.guild_id = guild_id
+
+        options = [
+            discord.SelectOption(
+                label=f"#{task['id']} {task['title']}"[:100],
+                description=f"Status: {task['status']}"[:100],
+                value=str(task["id"])
+            )
+            for task in project_tasks[:25]
+        ]
+
+        super().__init__(
+            placeholder="Choose a task to update...",
+            min_values=1,
+            max_values=1,
+            options=options
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        task_id = int(self.values[0])
+        project_tasks = tasks.get(self.guild_id, [])
+
+        task = next(
+            (t for t in project_tasks if t["id"] == task_id),
+            None
+        )
+
+        if task is None:
+            await interaction.response.send_message(
+                "That task could not be found.",
+                ephemeral=True
+            )
+            return
+
+        view = TaskStatusView(self.guild_id, task_id)
+
+        await interaction.response.edit_message(
+            content=(
+                f"### 📝 {task['title']}\n"
+                f"**Current status:** {task['status']}\n\n"
+                "Choose the new status below."
+            ),
+            view=view
+        )
+
+
+class TaskSelectView(discord.ui.View):
+    def __init__(self, guild_id: int, project_tasks: list):
+        super().__init__(timeout=180)
+        self.add_item(TaskSelect(guild_id, project_tasks))
+
+
+class UpdateDeadlineModal(discord.ui.Modal, title="Update Task Deadline"):
+    deadline = discord.ui.TextInput(
+        label="Deadline",
+        placeholder="e.g. 25 Oct 2026, 11:59 PM",
+        required=False,
+        max_length=100
+    )
+
+    def __init__(self, guild_id: int, task_id: int):
+        super().__init__()
+        self.guild_id = guild_id
+        self.task_id = task_id
+
+    async def on_submit(self, interaction: discord.Interaction):
+        project = projects.get(self.guild_id)
+        project_tasks = tasks.get(self.guild_id, [])
+
+        if not project or interaction.user.id not in project["members"]:
+            await interaction.response.send_message(
+                "❌ You must be a project member to update deadlines.",
+                ephemeral=True
+            )
+            return
+
+        task = next(
+            (t for t in project_tasks if t["id"] == self.task_id),
+            None
+        )
+
+        if not task:
+            await interaction.response.send_message(
+                "❌ Task not found.",
+                ephemeral=True
+            )
+            return
+
+        new_deadline = self.deadline.value.strip()
+        task["deadline"] = new_deadline or None
+
+        embed = discord.Embed(
+            title=f"📝 Task #{task['id']}: {task['title']}",
+            description=task["description"],
+            color=discord.Color.green()
+            if task["status"] == "Completed"
+            else discord.Color.blurple()
+        )
+
+        embed.add_field(
+            name="📌 Status",
+            value=task["status"],
+            inline=True
+        )
+
+        assignee = interaction.guild.get_member(task["assignee"]) if task.get("assignee") else None
+        embed.add_field(
+            name="👤 Assigned To",
+            value=assignee.mention if assignee else "Unassigned",
+            inline=True
+        )
+
+        creator = interaction.guild.get_member(task["created_by"])
+        embed.add_field(
+            name="✍️ Created By",
+            value=creator.mention if creator else "Unknown",
+            inline=True
+        )
+
+        embed.add_field(
+            name="📅 Deadline",
+            value=task["deadline"] or "No deadline set",
+            inline=True
+        )
+
+        embed.set_footer(text=f"{project['name']} • GroupMate AI")
+
+        await interaction.response.send_message(
+            "✅ Task deadline updated.",
+            embed=embed,
+            allowed_mentions=discord.AllowedMentions.none()
+        )
+
+
+class TaskStatusView(discord.ui.View):
+    def __init__(self, guild_id: int, task_id: int):
+        super().__init__(timeout=180)
+        self.guild_id = guild_id
+        self.task_id = task_id
+
+    async def update_status(
+        self,
+        interaction: discord.Interaction,
+        new_status: str
+    ):
+        project = projects.get(self.guild_id)
+
+        if project is None or interaction.user.id not in project["members"]:
+            await interaction.response.send_message(
+                "Only project members can update tasks.",
+                ephemeral=True
+            )
+            return
+
+        project_tasks = tasks.get(self.guild_id, [])
+        task = next(
+            (t for t in project_tasks if t["id"] == self.task_id),
+            None
+        )
+
+        if task is None:
+            await interaction.response.send_message(
+                "This task could not be found.",
+                ephemeral=True
+            )
+            return
+
+        old_status = task["status"]
+        task["status"] = new_status
+
+        status_emoji = {
+            "To Do": "🟡",
+            "In Progress": "🔵",
+            "Completed": "🟢"
+        }
+
+        assignee = (
+            f"<@{task['assignee']}>"
+            if task.get("assignee")
+            else "Unassigned"
+        )
+
+        creator = f"<@{task['created_by']}>"
+
+        embed = discord.Embed(
+            title=f"📝 Task #{task['id']}: {task['title']}",
+            description=task["description"],
+            color=discord.Color.green()
+            if new_status == "Completed"
+            else discord.Color.blurple()
+        )
+
+        embed.add_field(
+            name="Status",
+            value=f"{status_emoji[new_status]} {new_status}",
+            inline=True
+        )
+
+        embed.add_field(
+            name="Assigned To",
+            value=assignee,
+            inline=True
+        )
+
+        embed.add_field(
+            name="Created By",
+            value=creator,
+            inline=True
+        )
+
+        embed.add_field(
+            name="📅 Deadline",
+            value=task.get("deadline") or "No deadline set",
+            inline=True
+        )
+
+        embed.add_field(
+            name="Previous Status",
+            value=old_status,
+            inline=False
+        )
+
+        embed.set_footer(
+            text=f"{projects[self.guild_id]['name']} • GroupMate AI"
+        )
+
+        await interaction.response.edit_message(
+            content="✅ **Task updated successfully!**",
+            embed=embed,
+            view=None,
+            allowed_mentions=discord.AllowedMentions.none()
+        )
+
+    @discord.ui.button(
+        label="To Do",
+        style=discord.ButtonStyle.secondary,
+        emoji="🟡"
+    )
+    async def todo(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button
+    ):
+        await self.update_status(interaction, "To Do")
+
+    @discord.ui.button(
+        label="In Progress",
+        style=discord.ButtonStyle.primary,
+        emoji="🔵"
+    )
+    async def in_progress(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button
+    ):
+        await self.update_status(interaction, "In Progress")
+
+    @discord.ui.button(
+        label="Completed",
+        style=discord.ButtonStyle.success,
+        emoji="🟢"
+    )
+    async def completed(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button
+    ):
+        await self.update_status(interaction, "Completed")
+
+    @discord.ui.button(
+        label="Update Deadline",
+        style=discord.ButtonStyle.primary,
+        emoji="📅",
+        row=1
+    )
+    async def update_deadline(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button
+    ):
+        await interaction.response.send_modal(
+            UpdateDeadlineModal(self.guild_id, self.task_id)
+        )
+
+
 class ProjectCommands(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -304,7 +592,8 @@ class ProjectCommands(commands.Cog):
         interaction: discord.Interaction,
         title: str,
         description: str = "No description provided.",
-        assignee: discord.Member = None
+        assignee: discord.Member = None,
+        deadline: str = None
     ):
         if interaction.guild is None:
             await interaction.response.send_message(
@@ -345,7 +634,8 @@ class ProjectCommands(commands.Cog):
             "description": description,
             "assignee": assignee.id if assignee else None,
             "created_by": interaction.user.id,
-            "status": "To Do"
+            "status": "To Do",
+            "deadline": deadline
         }
 
         tasks.setdefault(interaction.guild.id, []).append(task)
@@ -369,6 +659,12 @@ class ProjectCommands(commands.Cog):
         )
 
         embed.add_field(
+            name="📅 Deadline",
+            value=deadline if deadline else "No deadline set",
+            inline=True
+        )
+
+        embed.add_field(
             name="Created By",
             value=interaction.user.mention,
             inline=True
@@ -381,6 +677,114 @@ class ProjectCommands(commands.Cog):
             allowed_mentions=discord.AllowedMentions.none()
         )
 
+    @project_group.command(
+        name="task-list",
+        description="View all tasks for your project."
+    )
+    async def list_tasks(self, interaction: discord.Interaction):
+        if interaction.guild is None:
+            await interaction.response.send_message(
+                "Tasks can only be viewed inside a Discord server.",
+                ephemeral=True
+            )
+            return
+
+        project = projects.get(interaction.guild.id)
+
+        if project is None:
+            await interaction.response.send_message(
+                "This server doesn't have a project yet. "
+                "Use `/project create` first.",
+                ephemeral=True
+            )
+            return
+
+        project_tasks = tasks.get(interaction.guild.id, [])
+
+        if not project_tasks:
+            await interaction.response.send_message(
+                "There are no tasks yet. Use `/project task-create` to add one."
+            )
+            return
+
+        embed = discord.Embed(
+            title=f"📋 {project['name']} | Task Board",
+            description=f"**Total tasks:** {len(project_tasks)}",
+            color=discord.Color.blurple()
+        )
+
+        for task in project_tasks:
+            assignee = (
+                f"<@{task['assignee']}>"
+                if task["assignee"]
+                else "Unassigned"
+            )
+
+            status_emoji = {
+                "To Do": "🟡",
+                "In Progress": "🔵",
+                "Completed": "🟢"
+            }.get(task["status"], "⚪")
+
+            embed.add_field(
+                name=f"#{task['id']} · {task['title']}",
+                value=(
+                    f"**Status:** {status_emoji} {task['status']}\n"
+                    f"**Assigned to:** {assignee}\n"
+                    f"**Description:** {task['description']}\n"
+                    f"**📅 Deadline:** {task.get('deadline') or 'No deadline set'}"
+                ),
+                inline=False
+            )
+
+        embed.set_footer(text="GroupMate AI • Project Task Board")
+
+        await interaction.response.send_message(
+            embed=embed,
+            allowed_mentions=discord.AllowedMentions.none()
+        )
+
+    @project_group.command(
+        name="task-update",
+        description="Choose a task and update its status."
+    )
+    async def update_task(self, interaction: discord.Interaction):
+        if interaction.guild is None:
+            await interaction.response.send_message(
+                "Tasks can only be updated inside a Discord server.",
+                ephemeral=True
+            )
+            return
+
+        project = projects.get(interaction.guild.id)
+
+        if project is None:
+            await interaction.response.send_message(
+                "This server doesn't have a project yet.",
+                ephemeral=True
+            )
+            return
+
+        if interaction.user.id not in project["members"]:
+            await interaction.response.send_message(
+                "Only project members can update tasks.",
+                ephemeral=True
+            )
+            return
+
+        project_tasks = tasks.get(interaction.guild.id, [])
+
+        if not project_tasks:
+            await interaction.response.send_message(
+                "There are no tasks yet. Use `/project task-create` first.",
+                ephemeral=True
+            )
+            return
+
+        await interaction.response.send_message(
+            "### 📋 Select a task to update",
+            view=TaskSelectView(interaction.guild.id, project_tasks),
+        )
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(ProjectCommands(bot))
